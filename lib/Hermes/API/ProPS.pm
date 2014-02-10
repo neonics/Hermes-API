@@ -14,591 +14,508 @@ use SOAP::Lite;
 
 use DateTime;
 use IO::File;
-use MIME::Base64;
+use MIME::Base64     'decode_base64';
 
-our $VERSION = '0.1300';
+our $VERSION = '0.1500';
 
-our %parms = (# Hermes::API authentication
-			  PartnerId => undef,
-			  PartnerPwd => undef,
-			  PartnerToken => undef,
-			  UserToken => undef,
+my $wsse = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
+my $wsu  = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
+my $ns_hermes = "http://hermes_api.service.hlg.de"; # tns2 for the child of body tag( the soap operation name
 
-			  # Module parameters
-			  SandBox => 0,
+our %parms = (
+	# Hermes::API authentication
+	PartnerId      => undef,
+	PartnerPwd     => undef,
+	PartnerToken   => undef,
+	UserToken      => undef,
 
-			  SandBoxHost => 'sandboxapi.hlg.de',
-			  ProductionHost => 'hermesapi2.hlg.de',
-			  APIVersion => '1.3',
+	# Module parameters
+	SandBox        => 0,
+	SandBoxHost    => 'hermesapisbx.hlg.de',	# sandboxapi.hlg.de
+	ProductionHost => 'hermesapi.hlg.de',	# hermesapi2.hlg.de
+	APIVersion     => '1.5',			# 1.3
 
-			  # Debug/logging
-			  Trace => undef,
-			 );
+	# Debug/logging
+	Trace          => undef,
+ );
 
-sub new {
-	my ($class, $self);
+sub new( $@ ) {( bless {}, shift )->initialize( @_ ) }
 
-	$class = shift;
-	
-	$self = {};
-	bless ($self, $class);
-
-	unless ($self->initialize(@_)) {
-		die "Invalid parameters for Hermes::API::ProPS\n";
-	}
-
-	return $self;
-}
-
-sub initialize {
+sub initialize( @ )
+{
 	my ($self, @args) = @_;
-	my ($key, $value);
 
 	# defaults
-	for (keys %parms) {
-		if (defined $parms{$_}) {
-			$self->{$_} = $parms{$_};
-		}
-	}
-	
+	defined $parms{$_} and $self->{$_} = $parms{$_}
+		for keys %parms;
+
 	# check for required parameters: PartnerId and PartnerPwd
-	while (@args) {
-		$key = shift @args;
-		$value = shift @args;
-
-		if (exists $parms{$key}) {
-			$self->{$key} = $value;
-		}
+	while ( @args )
+	{
+		my ($key, $value) = (shift @args, shift @args);
+		$self->{$key} = $value if exists $parms{$key};
 	}
 
-	unless (defined $self->{PartnerId} && defined $self->{PartnerPwd}) {
+	unless ( defined $self->{PartnerId} && defined $self->{PartnerPwd} ) {
 		die "PartnerId and PartnerPwd parameters required for Hermes::API::ProPS objects.\n";
 	}
 
-	# log dispatcher
-	my @outputs;
+	# defaults
+	defined $parms{$_} && ($self->{$_} = $parms{$_})
+		for keys %parms;
 
-	@outputs = (['Screen', min_level => 'debug']);
-	
-	$self->{log} = new Log::Dispatch(outputs => \@outputs);
-	
+	# log dispatcher
+	$self->{log} = new Log::Dispatch( outputs => [['Screen', min_level => 'debug']] );
+
 	# finally build URL
+	my $url =
 	$self->{url} = $self->build_url();
 
 	# instantiate SOAP::Lite
-	$self->{soap} = new SOAP::Lite(proxy => $self->{url});
+	my $soap =
+	$self->{soap} = new SOAP::Lite( proxy => $url )->uri( $ns_hermes );
+	$soap->on_action( sub { qq( "$_[1]" ) } );
+	$soap->autotype( 0 );
 
-	if ($self->{Trace}) {
-		my $request_sub = sub {$self->log_request(@_)};
-		$self->{soap}->import(+trace => [transport => $request_sub]);		
+	if ( $self->{Trace} ) {
+		my $request_sub = sub {$self->log_request( @_ )};
+		$self->{soap}->import( +trace => [transport => $request_sub] );
 	}
-	
-	return 1;		
+
+	$self;
 }
 
-sub url {
-	my ($self) = @_;
+sub url               { shift->{url} }
+sub CheckAvailability { shift->ProPS( 'propsCheckAvailability' ) }
 
-	return $self->{url};
-}
-
-sub CheckAvailability {
-	my ($self) = @_;
-
-	$self->ProPS('propsCheckAvailability');
-}
-
-sub UserLogin {
+sub UserLogin( $$ )
+{
 	my ($self, $username, $password) = @_;
-	my ($input_params, $soap_params, $ret);
 
-	$input_params = ['login' => ['benutzername' => $username,
-								 'kennwort' => $password]];
+	my @credentials = ( benutzername => $username, kennwort => $password );
+	my $soap_params = $self->soap_parameters( [login => \@credentials] );
 
-	$soap_params = $self->soap_parameters($input_params);
-	
-	if ($ret = $self->ProPS('propsUserLogin', $soap_params)) {
-		# set user token for further requests
-		$self->{UserToken} = $ret;
-	}
+	my $ret = $self->ProPS(propsUserLogin => $soap_params)
+		or return;
 
-	return $ret;
+	# set user token for further requests
+	$self->{UserToken} = $ret;
 }
 
-sub OrderSave {
+sub OrderSave( $% )
+{
 	my ($self, $address, %extra) = @_;
-	my ($soap_params, $ret);
-	
-	$soap_params = $self->order_parameters($address, %extra);
-	
-	$ret = $self->ProPS('propsOrderSave', $soap_params);
-
-	return $ret;
+	my $soap_params = $self->order_parameters( $address, %extra );
+	$self->ProPS( propsOrderSave => $soap_params );
 }
 
-sub OrderDelete {
+sub OrderDelete( $ )
+{
 	my ($self, $order_number) = @_;
-	my ($input_params, $soap_params, $ret);
-	
-	unless ($self->{UserToken}) {
-		die "UserToken required for OrderDelete service.\n";
-	}
 
-	$input_params = ['orderNo' => {value => $order_number, type => 'string'}];
-	$soap_params = $self->soap_parameters($input_params);
+	$self->{UserToken}
+		or die "UserToken required for OrderDelete service.\n";
 
-	$ret = $self->ProPS('propsOrderDelete', $soap_params);
-
-	return $ret;
+	my $order_no = {value => $order_number, type => 'string'};
+	my $soap_params  = $self->soap_parameters( [orderNo => $order_no] );
+	$self->ProPS( propsOrderDelete => $soap_params );
 }
 
-sub GetOrder {
+sub GetOrder( % )
+{
 	my ($self, %parms) = @_;
-	my ($input_params, $soap_params, $ret);
-	
-	unless ($self->{UserToken}) {
-		die "UserToken required for GetOrder service.\n";
-	}
 
-	$input_params = ['orderNo' => {value => $parms{orderNo},
-								   type => 'string'},
-					 'shippingId' => {value => $parms{shippingId},
-									  type => 'string'},
-					];
-	$soap_params = $self->soap_parameters($input_params);
+	$self->{UserToken}
+		or die "UserToken required for GetOrder service.\n";
 
-	$ret = $self->ProPS('propsGetPropsOrder', $soap_params);
-	
-	return $ret;
+	my $input_params =
+	[	orderNo    => {value => $parms{orderNo},    type => 'string'}
+	,	shippingId => {value => $parms{shippingId}, type => 'string'}
+	];
+
+	$self->ProPS( propsGetPropsOrder => $self->soap_parameters( $input_params ) );
 }
 
-sub GetOrders {
+sub GetOrders
+{
 	my ($self, $search) = @_;
-	my ($input_params, $soap_params, $ret, $orders);
-	
-	unless ($self->{UserToken}) {
-		die "UserToken required for GetOrders service.\n";
-	}
-	
-	$soap_params = $self->search_parameters($search);
 
-	if ($ret = $self->ProPS('propsGetPropsOrders', $soap_params)) {
-		$orders = $ret->{orders}->{PropsOrderShort};
+	$self->{UserToken}
+		or die "UserToken required for GetOrders service.\n";
 
-		if (! defined $orders) {
-			# no matches
-			return[];
-		}
-		elsif (ref($orders) eq 'HASH') {
-			# we get hash reference for single matches
-			return [$orders];
-		}
-		else {
-			return $orders;
-		}
-	}
+	my $soap_params = $self->search_parameters( $search );
+	my $ret = $self->ProPS( propsGetPropsOrders => $soap_params )
+		or return;
 
-	return;
+	my $orders = $ret->{orders}{PropsOrderShort};
+
+	! defined $orders
+		? return[] # no matches
+		: ref $orders eq 'HASH'
+			? return [$orders]   # single answer
+			: $orders;
 }
 
-sub PrintLabel {
+sub PrintLabel( $$$$ )
+{
 	my ($self, $order_number, $format, $position, $output) = @_;
-	my ($service, $input_params, $soap_params, $output_param, $ret);
-	
-	if ($format eq 'PDF') {
-		$service = 'propsOrderPrintLabelPdf';
-		$input_params = [orderNo => {value => $order_number, type => 'string'},
-						 position => ($position || 1)];
+
+	$self->{UserToken}
+		or die "UserToken required for GetOrders service.\n";
+
+	my ($service, $input_params, $output_param);
+	if ( $format eq 'PDF' )
+	{
+		$service      = 'propsOrderPrintLabelPdf';
+		$input_params =
+		[	orderNo => {value => $order_number, type => 'string'}
+		,	position =>( $position || 1 )
+		];
 		$output_param = 'pdfData';
 	}
-	elsif ($format eq 'JPEG') {
-		$service = 'propsOrderPrintLabelJpeg';
-		$input_params = [orderNo => {value => $order_number, type => 'string'}];
+	elsif ( $format eq 'JPEG' )
+	{
+		$service      = 'propsOrderPrintLabelJpeg';
+		$input_params = [orderNo => {value => $order_number, type=> 'string'}];
 		$output_param = 'jpegData';
 	}
 
-	$soap_params = $self->soap_parameters($input_params);
-	
-	unless ($self->{UserToken}) {
-		die "UserToken required for GetOrders service.\n";
-	}
+	my $soap_params = $self->soap_parameters( $input_params );
 
-	$ret = $self->ProPS($service, $soap_params);
+	my $ret = $self->ProPS( $service, $soap_params )
+		or return;
 
-	if ($ret && $output) {
-		my ($fh, $data);
-		
-		$fh = new IO::File "> $output";
-		$data = MIME::Base64::decode_base64($ret->{$output_param});
-
-		print $fh $data;
-
+	if ( $output )
+	{
+		my $fh = IO::File->new( $output, 'w' );
+		print $fh decode_base64 $ret->{$output_param};
 		$fh->close;
 	}
-	
-	return $ret->{$output_param};
+	$ret->{$output_param};
 }
 
-sub CollectionRequest {
+sub CollectionRequest( $% )
+{
 	my ($self, $date, %parcel_counts) = @_;
-	my (@request_parms, $soap_params, $name, $count, $ret);
 
-	push (@request_parms, collectionDate => $date);
+	$self->{UserToken}
+		or die "UserToken required for CollectionRequest service.\n";
 
-	# parameters for collection request
-	for (qw/XS S M L XL XXL/) {
-		$name = "numberOfParcelsClass_$_";
+	my @request_parms = (collectionDate => $date);
 
-                if (exists $parcel_counts{$_}) {
-			$count = $parcel_counts{$_};
-		}
-		else {
-			$count = 0;
-		}
-
-		push (@request_parms, $name, $count);
-	}
- 
-	unless ($self->{UserToken}) {
-                die "UserToken required for CollectionRequest service.\n";
-        }
-
-	$soap_params = $self->soap_parameters([collectionOrder => \@request_parms]);
-
-        if ($ret = $self->ProPS('propsCollectionRequest', $soap_params)) {
-		return $ret;
+	foreach( qw/XS S M L XL XXL/ )
+	{
+		push @request_parms, "numberOfParcelsClass_$_" =>( $parcel_counts{$_} || 0 );
 	}
 
-	return;
+	$self->ProPS( propsCollectionRequest => $self->soap_parameters( [collectionOrder => \@request_parms] ) );
 }
 
 sub CollectionCancel {
-	my ($self, $date) = @_;
-	my ($soap_params, $ret);
+     my ($self, $date) = @_;
 
-	unless ($self->{UserToken}) {
-                die "UserToken required for CollectionCancel service.\n";
-        }
+     $self->{UserToken}
+        or die "UserToken required for CollectionCancel service.\n";
 
-	$soap_params = $self->soap_parameters([collectionDate => $date]);
-
-	if ($ret = $self->ProPS('propsCollectionCancel', $soap_params)) {
-                return $ret;
-        }
-
-        return;
+     my $soap_params = $self->soap_parameters( [collectionDate => $date] );
+     $self->ProPS( propsCollectionCancel => $soap_params );
 }
 
-sub GetCollectionOrders {
+sub GetCollectionOrders( $$$ )
+{
 	my ($self, $date_from, $date_to, $large) = @_;
-	my (@collection_params, $soap_params, $orders, $ret);
 
-	unless ($date_from) {
-		$date_from = DateTime->now()->iso8601();
-	}
+	$self->{UserToken}
+		or die "UserToken required for GetOrders service.\n";
 
-	unless ($date_to) {
-		$date_to = DateTime->now()->add(months => 3)->iso8601();
-	}
+	$date_from ||= DateTime->now->iso8601;
+	$date_to   ||= DateTime->now->add( months => 3 )->iso8601;
+	defined $large or $large = 0;
 
-	unless (defined $large) {
-		$large = 0;
-	}
+	my $soap_params = $self->soap_parameters(
+		[	collectionDateFrom => $date_from,
+		,	collectionDateTo   => $date_to,
+		,	onlyMoreThan2ccm   => $large
+		]
+	);
 
-	@collection_params = (collectionDateFrom => $date_from,
-						  collectionDateTo => $date_to,
-						  onlyMoreThan2ccm => $large);
+	my $ret = $self->ProPS( propsGetCollectionOrders => $soap_params )
+		or return;
 
-	$soap_params = $self->soap_parameters(\@collection_params);
+	my $orders = $ret->{orders}{PropsCollectionOrderLong};
 
-	unless ($self->{UserToken}) {
-		die "UserToken required for GetOrders service.\n";
-	}
-	
-	if ($ret = $self->ProPS('propsGetCollectionOrders', $soap_params)) {
-		$orders = $ret->{orders}->{PropsCollectionOrderLong};
-
-		if (! defined $orders) {
-			# no matches
-			return[];
-		}
-		elsif (ref($orders) eq 'HASH') {
-			# we get hash reference for single matches
-			return [$orders];
-		}
-		else {
-			return $orders;
-		}
-	}
-
-	return;
+	!defined $orders
+		? return []
+		: ref $orders eq 'HASH'
+			? return [$orders]  # single answer is hash
+			: $orders;
 }
 
-sub ReadShipmentStatus {
+sub ReadShipmentStatus( $ )
+{
 	my ($self, $shipid) = @_;
-	my ($soap_params, $ret);
 
-	$soap_params = $self->soap_parameters([shippingId => {value => $shipid, type => 'string'}]);
+	my $soap_params = $self->soap_parameters( [
+		shippingId => { value => $shipid, type => 'string' }
+	] );
 
-	if ($ret = $self->ProPS('propsReadShipmentStatus', $soap_params)) {
-		return $ret;
-	}
+	$self->ProPS( propsReadShipmentStatus => $soap_params );
 }
 
-sub ProductInformation {
+sub ProductInformation { shift->ProPS( 'propsProductlnformation' ) }
+
+sub ListOfProductsATG()
+{
 	my ($self) = @_;
-	my ($ret);
-	
-	$ret = $self->ProPS('propsProductlnformation');
+	$self->{UserToken}
+		or die "UserToken required for ListOfProductsATG service.\n";
 
-	return $ret;
+	$self->ProPS( 'propsListOfProductsATG' );
 }
 
-sub ListOfProductsATG {
-	my ($self) = @_;
-	my ($ret);
-
-	unless ($self->{UserToken}) {
-		die "UserToken required for ListOfProductsATG service.\n";
-	}
-	
-	$ret = $self->ProPS('propsListOfProductsATG');
-
-	return $ret;
-	
-}
-
-sub ProPS {
+sub ProPS
+{
 	my ($self, $service, @params) = @_;
-	my ($ret, @headers);
+
+	# modify service:make it a soap data object
+	$service  = SOAP::Data->new(
+		name => $service,
+		prefix => 'ha',
+		uri => $ns_hermes
+	 );
 
 	# build SOAP headers
-	@headers = $self->soap_header();
+	my @headers = $self->soap_header;
 
-	$ret = $self->{soap}->call($service, @params, @headers);
+	# this one works - only sets thens on the soapaction tag( in the body )
+	# XXX temp disabled $self->{soap}->ns( $ns_hermes );#->prefix( 'h' );
 
-	if ($@) {
-		die $@;
-	}
-	
-	if ($ret->fault()) {
-		my ($detail, $item);
-		
-		$detail = $ret->faultdetail();
+	#$self->{soap}->uri( $ns_hermes );#->prefix( 'h' );
 
-		if ($detail) {
-			# check for service exception
-			if (exists $detail->{ServiceException}->{exceptionItems}->{ExceptionItem}) {
-				$item = $detail->{ServiceException}->{exceptionItems}->{ExceptionItem};
+	my $ret = $self->{soap}->call( $service, @params, @headers );
+	die $@ if $@;  # XXX where's the eval?
 
-				$self->set_error($item);
-				return;
-			}
-			use Data::Dumper;
-			print Dumper($detail);
+	if ( $ret->fault )
+	{
+		my $detail = $ret->faultdetail
+			or die 'SOAP Fault: '.$ret->faultcode.'( '.$ret->faultstring." )";
+
+		# check for service exception
+		if ( my $item = $detail->{ServiceException}{exceptionItems}{ExceptionItem} )
+		{
+			$self->set_error( $item );
+			return;
 		}
-
-		die sprintf("SOAP Fault: %s (%s)\n", $ret->faultcode(), $ret->faultstring());
+		print Dumper $detail;
 	}
-	else {
-		$self->clear_error();
+	else
+	{
+		$self->clear_error;
 	}
 
 	# pick up PartnerToken from response header
-	$self->{PartnerToken} = $ret->header()->{PartnerToken};
-
-	return $ret->result();
+	$self->{PartnerToken} = $ret->header->{PartnerToken}
+		if ( ref $ret->header eq 'HASH' );
+	$ret->result;
 }
 
-sub search_parameters {
+sub search_parameters( $ )
+{
 	my ($self, $search) = @_;
-	my ($input, @search_parms, %address_parms);
-	
-	# country code conversion
-	if (ref($search) eq 'HASH' && exists $search->{countryCode}) {
-		$search->{countryCode} = $self->country_alpha3($search->{countryCode});
-	}
-
-	%address_parms = (lastname => 1, city => 1);
-	
-	for (qw/orderNo identNo from to lastname city postcode countryCode clientReferenceNumber ebayNumber status/) {
-		if (exists $search->{$_} && $search->{$_} =~ /\S/) {
-			if (exists $address_parms{$_}) {
-				# force type to "string" in order to avoid base64 encoding
-				push(@search_parms, $_, {value => $search->{$_}, type => 'string'});
-			}
-			else {
-				push(@search_parms, $_, $search->{$_});
-			}
-		}
-	}
-
-	$input = [searchCriteria => \@search_parms];
-	
-	return $self->soap_parameters($input);	
-}
-
-sub order_parameters {
-	my ($self, $address, %extra) = @_;
-	my ($input, @address_parms, @order_parms);
+	my ($input, @search_parms);
 
 	# country code conversion
-	$address->{countryCode} = $self->country_alpha3($address->{countryCode});
-		
-	for (qw/firstname lastname street houseNumber addressAdd postcode city district countryCode email telephoneNumber telephonePrefix/) {
-		if (exists $address->{$_} && $address->{$_} =~ /\S/) {
+	$search->{countryCode} = $self->country_alpha3( $search->{countryCode} )
+		if ref $search eq 'HASH' && exists $search->{countryCode};
+
+	my %address_parms = (lastname => 1, city => 1);
+
+	for( qw/orderNo identNo from to lastname city postcode
+		countryCode clientReferenceNumber ebayNumber status/ )
+	{
+		#defined $search->{$_} && $search->{$_} =~ /\S/ or next;
+
+		push @search_parms, defined $address_parms{$_}
 			# force type to "string" in order to avoid base64 encoding
-			push(@address_parms, $_, {value => $address->{$_}, type => 'string'});
-		}
+			?( $_ => {value => $search->{$_}, type => 'string'} )
+			:( $_ => $search->{$_} );
 	}
 
-	$extra{receiver} = \@address_parms;
-
-	for (qw/orderNo receiver clientReferenceNumber parcelClass amountCashOnDelivery includeCashOnDelivery/) {
-		if (exists $extra{$_}) {
-			push (@order_parms, $_, $extra{$_});
-		}
-	}
-		
-	$input = [propsOrder => \@order_parms];
-
-	return $self->soap_parameters($input);
+	$self->soap_parameters( [searchCriteria => \@search_parms] );
 }
 
-sub country_alpha3 {
+sub order_parameters
+{
+	my ($self, $address, %extra) = @_;
+
+	# country code conversion
+	$address->{countryCode} = $self->country_alpha3( $address->{countryCode} );
+
+	my @address_parms;
+	for( qw/firstname lastname street houseNumber addressAdd postcode
+		city district countryCode email telephoneNumber telephonePrefix/ )
+	{
+		exists $address->{$_} && $address->{$_} =~ /\S/ or next;
+		# force type to "string" in order to avoid base64 encoding
+		push @address_parms, $_ => {value => $address->{$_}, type => 'string'};
+	}
+
+	my @order_parms = ( receiver => \@address_parms );
+	foreach( qw/orderNo clientReferenceNumber parcelClass
+		amountCashOnDelivery includeCashOnDelivery/ )
+	{
+		push @order_parms, $_ => $extra{$_}
+			if exists $extra{$_};
+	}
+
+	$self->soap_parameters( [propsOrder => \@order_parms] );
+}
+
+sub country_alpha3( $ )
+{
 	my ($self, $code) = @_;
-	my ($lc, $lct) = @_;
+	$code && length( $code )==2
+		or return $code;
 
-	if ($code && length($code) == 2) {
-		$lc = new Locale::Geocode;
+	my $lc  = Locale::Geocode->new;
+	my $lct = $lc->lookup( $code )
+		or die "Invalid country code $code\n";
 
-		unless ($lct = $lc->lookup($code)) {
-			die "Invalid country code $code\n";
-		}
-
-		$code = $lct->alpha3;
-	}
-
-	return $code;
+	$lct->alpha3;
 }
 
-sub build_url {
+sub build_url( )
+{
 	my ($self) = @_;
-	my ($url, $host, $version_part);
 
-	$version_part = $self->{APIVersion};
-	$version_part =~ s/\./_/g;
+	my $version_part = $self->{APIVersion};
+	$version_part    =~ s/\.//g;
 
-	if ($self->{SandBox}) {
-		$host = $self->{SandBoxHost};
-	}
-	else {
-		$host = $self->{ProductionHost};
-	}
+	my $host = $self->{SandBox}
+		? $self->{SandBoxHost}
+		: $self->{ProductionHost};
 
-	$url = "https://$host/Hermes_API_Web/$version_part/services/ProPS";
-
-	return $url;	
+	"https://$host/hermes-api-props-web/services/v${version_part}/ProPS";#?wsdl";
 }
 
-sub soap_header {
+sub soap_header
+{
 	my ($self) = @_;
-	my (@headers);
-	
-	for (qw/PartnerId PartnerPwd PartnerToken UserToken/) {
-		if (exists $self->{$_}) {
-			push(@headers, SOAP::Header->name($_)->value($self->{$_}));
-		}
+	my @headers;
+
+#	foreach( qw/PartnerId PartnerPwd PartnerToken UserToken/ )
+#	{
+#		exists $self->{$_} or next;
+#		push @headers, SOAP::Header->name( $_ )->value( $self->{$_} )
+#	}
+
+	my $user  = SOAP::Data->name( Username => $self->{PartnerId} );
+	my $pwd   = SOAP::Data->name( Password => $self->{PartnerPwd} );
+	$pwd->attr( { Type => "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText" } );
+
+	$_->prefix( 'wsse' )->type( '' ) for $user, $pwd;
+
+	my $token = SOAP::Data->new
+	(	name   => 'UsernameToken'
+	,	prefix => 'wsse' # 'wsse'
+	,	value  => \SOAP::Data->value( $user, $pwd )
+	);
+
+	$token->attr( { 'wsu:Id' => 'UsernameToken-1' } );
+
+	my $sec   = SOAP::Header->new
+	(	name   => 'Security'
+	,	uri    => $wsse
+	,	prefix => 'wsse'
+	,	value  => \$token
+	);
+
+	$sec->attr( { 'xmlns:wsu' => $wsu } );
+
+
+	$sec = SOAP::Header->name(
+		"Security" => \SOAP::Header->value(
+			SOAP::Data->name(
+				"UsernameToken" => \SOAP::Data->value( $user, $pwd )
+			 )
+			->attr( {'wsu:Id' => 'UsernameToken-1' } )
+			->prefix( 'wsse' )
+		 )
+	)
+	->uri( $wsse )->prefix( 'wsse' )
+	->attr( {'xmlns:wsu'=>$wsu} );
+
+	$sec->mustUnderstand( 1 );
+
+	push @headers, $sec;
+
+	if ( my $ut = $self->{UserToken} )
+	{
+		push @headers, SOAP::Header->name( 'UserToken' )->value( $ut )
+			# NOT taken care of by default_ns
+			->uri( $ns_hermes )
+			->prefix( 'her' )
+		;
 	}
 
-	return @headers;
+	@headers;
 }
 
-sub soap_parameters {
+sub soap_parameters( $$$ )
+{
 	my ($self, $input, $level) = @_;
-	my ($key, $value, @params);
-
 	$level ||= 0;
 
-	if (@$input > 2 && $level == 0) {
+	my @input = @$input;
+	if ( @input > 2 && $level == 0 )
+	{
 		# build XML string and pass to SOAP::Data
+		no warnings 'uninitialized';
 		my $xml;
-		
-		for (my $i = 0; $i < @$input; $i += 2) {
-			$key = $input->[$i];
-			$value = $input->[$i+1];
+		while ( @input )
+		{
+			my ($key, $value) = ( shift @input, shift @input );
+			defined $value or next;
 
-			if (ref($value) eq 'HASH') {
-				$xml .= qq{<$key>$value->{value}</$key>};
-			}
-			else {
-				$xml .= qq{<$key>$value</$key>};
-			}
+			$xml .= ref $value eq 'HASH'
+				? qq{<$key>$value->{value}</$key>}
+				: qq{<$key>$value</$key>};
 		}
-
-		return SOAP::Data->type(xml => $xml);
-	}
-	
-	for (my $i = 0; $i < @$input; $i += 2) {
-		$key = $input->[$i];
-		$value = $input->[$i+1];
-
-		if (ref($value) eq 'ARRAY') {
-			push (@params, SOAP::Data->name($key => $self->soap_parameters($value, $level + 1)));
-		}
-		elsif (ref($value) eq 'HASH') {
-			# forcing SOAP type
-			push (@params, SOAP::Data->name($key => $value->{value})->type($value->{type}));
-		}
-		else {
-			push (@params, SOAP::Data->name($key => $value));
-		}
+		return SOAP::Data->type( xml => $xml );
 	}
 
-	if (! $level) {
-		return $params[0];
+	my @params;
+	while ( @input )
+	{
+		my ($key, $value) = (shift @input, shift @input);
+		push @params
+			, ref $value eq 'ARRAY'
+			? SOAP::Data->name( $key => $self->soap_parameters( $value, $level+1 ) )
+			: ref $value eq 'HASH' # forcing SOAP type
+			? SOAP::Data->name( $key => $value->{value} )->type( $value->{type} )
+			: SOAP::Data->name( $key => $value );
 	}
-	else {
-		return \SOAP::Data->value(@params);
-	}
+
+	$level ? \SOAP::Data->value( @params ) : $params[0];
 }
 
 # error handling
-sub set_error {
-	my ($self, $item) = @_;
+sub set_error	{ shift->{error} = shift }
 
-	$self->{error} = $item;
-}
+sub clear_error	{ delete shift->{error}  }
 
-sub clear_error {
+sub get_error
+{
 	my ($self) = @_;
-
-	delete $self->{error};
+	my @err = ref $self->{error} eq 'ARRAY' ? @{$self->{error}} :$self->{error};
+	@err ? join( "\n", map {$_->{errorMessage}} @err ) : "No error defined";
 }
 
-sub get_error {
-	my ($self) = @_;
-	
-	if (ref($self->{error}) eq 'ARRAY') {
-        	return join("\n", map {$_->{errorMessage}} @{$self->{error}});
-    	}
-	if ($self->{error}) {
-		return $self->{error}->{errorMessage};
-	}
-
-	return "No error defined";
-}
-
-sub log_request {
+sub log_request
+{
 	my ($self, $in) = @_;
-	
-    if (ref($in) eq "HTTP::Request") {
-		# do something...
-		$self->{log}->debug($in->as_string);
-    } elsif (ref($in) eq "HTTP::Response") {
-		# do something
-		$self->{log}->debug($in->as_string);
-    }
+	$self->{log}->debug( $in->as_string )
+		if $in->isa( "HTTP::Message" );
 }
 
 1;
