@@ -169,7 +169,7 @@ sub PrintLabel( $$$$ )
 		$service      = 'propsOrderPrintLabelPdf';
 		$input_params =
 		[	orderNo => {value => $order_number, type => 'string'}
-		,	position =>( $position || 1 )
+		,	printPosition =>( $position || 1 )
 		];
 		$output_param = 'pdfData';
 	}
@@ -306,6 +306,7 @@ sub ProPS
 			$self->set_error( $item );
 			return;
 		}
+		use Data::Dumper;
 		print Dumper $detail;
 	}
 	else
