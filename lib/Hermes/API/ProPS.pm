@@ -356,7 +356,7 @@ sub order_parameters
 	for( qw/firstname lastname street houseNumber addressAdd postcode
 		city district countryCode email telephoneNumber telephonePrefix/ )
 	{
-		exists $address->{$_} && $address->{$_} =~ /\S/ or next;
+		defined $address->{$_} && $address->{$_} =~ /\S/ or next;
 		# force type to "string" in order to avoid base64 encoding
 		push @address_parms, $_ => {value => $address->{$_}, type => 'string'};
 	}
