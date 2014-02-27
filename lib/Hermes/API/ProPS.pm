@@ -307,7 +307,8 @@ sub ProPS
 			return;
 		}
 		use Data::Dumper;
-		print Dumper $detail;
+		print "fault: ", Dumper $detail;
+		return $ret->faultdetail;
 	}
 	else
 	{
