@@ -301,14 +301,20 @@ sub ProPS
 			or die 'SOAP Fault: '.$ret->faultcode.'( '.$ret->faultstring." )";
 
 		# check for service exception
+		# XXX this no longer matches in v1.5; see get_error for current format.
 		if ( my $item = $detail->{ServiceException}{exceptionItems}{ExceptionItem} )
 		{
 			$self->set_error( $item );
 			return;
 		}
+		else
+		{
+			# filter out the soap internals
+			$self->set_error( { ServiceException => $detail->{ServiceException} } );
+		}
 		use Data::Dumper;
-		print "fault: ", Dumper $detail;
-		return $ret->faultdetail;
+		print "Hermes ProPS: fault: ", Dumper $detail;
+		return;
 	}
 	else
 	{
@@ -353,6 +359,9 @@ sub order_parameters
 	# country code conversion
 	$address->{countryCode} = $self->country_alpha3( $address->{countryCode} );
 
+	# required non-null parameters
+	$address->{houseNumber} ||= 0;
+
 	my @address_parms;
 	for( qw/firstname lastname street houseNumber addressAdd postcode
 		city district countryCode email telephoneNumber telephonePrefix/ )
@@ -361,6 +370,7 @@ sub order_parameters
 		# force type to "string" in order to avoid base64 encoding
 		push @address_parms, $_ => {value => $address->{$_}, type => 'string'};
 	}
+
 
 	my @order_parms = ( receiver => \@address_parms );
 	foreach( qw/orderNo clientReferenceNumber parcelClass
@@ -502,15 +512,34 @@ sub soap_parameters( $$$ )
 }
 
 # error handling
-sub set_error	{ shift->{error} = shift }
+sub set_error	{ my ($self, $error) = @_; $self->{error} = $error; } #shift->{error} = shift }
 
 sub clear_error	{ delete shift->{error}  }
+
+sub get_fault { shift->{error} }
 
 sub get_error
 {
 	my ($self) = @_;
-	my @err = ref $self->{error} eq 'ARRAY' ? @{$self->{error}} :$self->{error};
-	@err ? join( "\n", map {$_->{errorMessage}} @err ) : "No error defined";
+
+	if ( ref $self->{error} eq 'HASH' )
+	{
+		::logError("Hermes ProPS: hash: " );
+		#  'ServiceException' => {
+		#    'exceptionItems' => {
+		#      'errorCode' => '312139',
+		#      'errorType' => 'B',
+		#      'errorMessage' => "Die Hausnummer des Empf\x{e4}ngers ist leer. "
+		#    }
+		#  }
+		return $self->{error}{ServiceException}{exceptionItems}{errorType}
+		. $self->{error}{ServiceException}{exceptionItems}{errorCode}
+		.": ". $self->{error}{ServiceException}{exceptionItems}{errorMessage}
+	}
+
+
+	my @err = ref $self->{error} eq 'ARRAY' ? @{$self->{error}} : $self->{error};
+	@err ? "XXX".join( "\n", map {$_->{errorMessage}} @err ) : "No error defined";
 }
 
 sub log_request
