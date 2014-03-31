@@ -522,6 +522,8 @@ sub get_error
 {
 	my ($self) = @_;
 
+	return "No error" unless $self->{error};
+
 	if ( ref $self->{error} eq 'HASH' )
 	{
 		::logError("Hermes ProPS: hash: " );
